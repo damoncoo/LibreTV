@@ -61,9 +61,9 @@ async function renderPage(filePath, password) {
   }
   // 添加ADMINPASSWORD注入
   if (config.adminpassword !== '') {
-      const adminSha256 = await sha256Hash(config.adminpassword);
-      content = content.replace('{{ADMINPASSWORD}}', adminSha256);
-  } 
+    const adminSha256 = await sha256Hash(config.adminpassword);
+    content = content.replace('{{ADMINPASSWORD}}', adminSha256);
+  }
   return content;
 }
 
@@ -78,7 +78,7 @@ app.get(['/', '/index.html', '/player.html'], async (req, res) => {
         filePath = path.join(__dirname, 'index.html');
         break;
     }
-    
+
     const content = await renderPage(filePath, config.password);
     res.send(content);
   } catch (error) {
@@ -102,20 +102,20 @@ function isValidUrl(urlString) {
   try {
     const parsed = new URL(urlString);
     const allowedProtocols = ['http:', 'https:'];
-    
+
     // 从环境变量获取阻止的主机名列表
     const blockedHostnames = (process.env.BLOCKED_HOSTS || 'localhost,127.0.0.1,0.0.0.0,::1').split(',');
-    
+
     // 从环境变量获取阻止的 IP 前缀
     const blockedPrefixes = (process.env.BLOCKED_IP_PREFIXES || '192.168.,10.,172.').split(',');
-    
+
     if (!allowedProtocols.includes(parsed.protocol)) return false;
     if (blockedHostnames.includes(parsed.hostname)) return false;
-    
+
     for (const prefix of blockedPrefixes) {
       if (parsed.hostname.startsWith(prefix)) return false;
     }
-    
+
     return true;
   } catch {
     return false;
@@ -145,7 +145,7 @@ app.get('/proxy/:encodedUrl', async (req, res) => {
     // 添加请求超时和重试逻辑
     const maxRetries = config.maxRetries;
     let retries = 0;
-    
+
     const makeRequest = async () => {
       try {
         return await axios({
@@ -172,10 +172,10 @@ app.get('/proxy/:encodedUrl', async (req, res) => {
     // 转发响应头（过滤敏感头）
     const headers = { ...response.headers };
     const sensitiveHeaders = (
-      process.env.FILTERED_HEADERS || 
+      process.env.FILTERED_HEADERS ||
       'content-security-policy,cookie,set-cookie,x-frame-options,access-control-allow-origin'
     ).split(',');
-    
+
     sensitiveHeaders.forEach(header => delete headers[header]);
     res.set(headers);
 
@@ -256,7 +256,6 @@ app.get('/api/recommendations', async (req, res) => {
     });
   }
 });
-
 app.get('/api/search', async (req, res) => {
   try {
     const query = req.query.q;
@@ -270,7 +269,6 @@ app.get('/api/search', async (req, res) => {
     const source = req.query.source;
     const includeAdult = req.query.includeAdult === 'true';
     const aggregated = req.query.aggregated === 'true';
-
     const apiConfig = getApiConfig(includeAdult);
 
     if (aggregated) {
@@ -391,20 +389,124 @@ app.get('/api/search', async (req, res) => {
   }
 });
 
+async function getMovieDetail(id, source, apiConfig) {
+
+  const apiUrl = `${apiConfig[source].api}?ac=videolist&ids=${id}`;
+  const response = await axios({
+    method: 'get',
+    url: apiUrl,
+    timeout: config.timeout,
+    headers: {
+      'User-Agent': config.userAgent
+    }
+  });
+
+  if (response.data && response.data.list && response.data.list.length > 0) {
+    const movie = response.data.list[0];
+
+    // Extract video URLs
+    let episodes = [];
+    if (movie.vod_play_url) {
+      const playSources = movie.vod_play_url.split('$$$');
+      if (playSources.length > 0) {
+        const mainSource = playSources[0];
+        const episodeList = mainSource.split('#');
+
+        episodes = episodeList.map((ep, index) => {
+          const parts = ep.split('$');
+          return {
+            episode: index + 1,
+            title: parts.length > 1 ? parts[0] : `Episode ${index + 1}`,
+            url: parts.length > 1 ? parts[1] : parts[0]
+          };
+        }).filter(ep => ep.url && (ep.url.startsWith('http://') || ep.url.startsWith('https://')));
+      }
+    }
+    let movieDetail = {
+      id: movie.vod_id,
+      title: movie.vod_name,
+      poster: movie.vod_pic,
+      description: movie.vod_content,
+      year: movie.vod_year,
+      area: movie.vod_area,
+      type: movie.type_name,
+      director: movie.vod_director,
+      actor: movie.vod_actor,
+      remarks: movie.vod_remarks,
+      episodes: episodes,
+      source: source,
+      sourceName: apiConfig[source].name
+    };
+    return movieDetail;
+  }
+
+  return null;
+}
+
+// Enhanced detail API endpoint that handles special sources and custom APIs
 app.get('/api/movie/:id', async (req, res) => {
   try {
-    const movieId = req.params.id;
+    const id = req.params.id || req.query.id;
     const source = req.query.source || 'heimuer';
-    const apiConfig = getApiConfig();
+    const customApi = req.query.customApi;
+    const customDetail = req.query.customDetail;
 
-    if (!apiConfig[source]) {
+    if (!id) {
       return res.status(400).json({
-        success: false,
-        error: 'Invalid source'
+        code: 400,
+        msg: '缺少视频ID参数',
+        episodes: []
       });
     }
 
-    const apiUrl = `${apiConfig[source].api}?ac=videolist&ids=${movieId}`;
+    // Validate ID format
+    if (!/^[\w-]+$/.test(id)) {
+      return res.status(400).json({
+        code: 400,
+        msg: '无效的视频ID格式',
+        episodes: []
+      });
+    }
+
+    let otherEpisodes = [];
+    const apiConfig = getApiConfig();
+    // Handle custom API with special detail page
+    if (source === 'custom' && customDetail) {
+      const result = await handleCustomApiSpecialDetail(id, customDetail);
+      otherEpisodes = result;
+    }
+
+    // Handle built-in sources with special detail pages
+    if (source !== 'custom' && apiConfig[source] && apiConfig[source].detail) {
+      const result = await handleSpecialSourceDetail(id, source, apiConfig[source]);
+      otherEpisodes = result;
+    }
+
+    // Regular API detail request
+    let apiUrl;
+    let sourceName;
+
+    if (source === 'custom' && customApi) {
+      if (!/^https?:\/\//.test(customApi)) {
+        return res.status(400).json({
+          code: 400,
+          msg: '无效的自定义API地址',
+          episodes: []
+        });
+      }
+      apiUrl = `${customApi}?ac=videolist&ids=${id}`;
+      sourceName = '自定义源';
+    } else {
+      if (!apiConfig[source]) {
+        return res.status(400).json({
+          code: 400,
+          msg: '无效的API来源',
+          episodes: []
+        });
+      }
+      apiUrl = `${apiConfig[source].api}?ac=videolist&ids=${id}`;
+      sourceName = apiConfig[source].name;
+    }
 
     const response = await axios({
       method: 'get',
@@ -416,17 +518,18 @@ app.get('/api/movie/:id', async (req, res) => {
     });
 
     if (response.data && response.data.list && response.data.list.length > 0) {
-      const movie = response.data.list[0];
+      const videoDetail = response.data.list[0];
 
-      // Extract video URLs
+      // Extract episodes from vod_play_url
       let episodes = [];
-      if (movie.vod_play_url) {
-        const playSources = movie.vod_play_url.split('$$$');
+      if (videoDetail.vod_play_url) {
+        const playSources = videoDetail.vod_play_url.split('$$$');
         if (playSources.length > 0) {
           const mainSource = playSources[0];
           const episodeList = mainSource.split('#');
 
-          episodes = episodeList.map((ep, index) => {
+          episodes = episodeList.
+          map((ep, index) => {
             const parts = ep.split('$');
             return {
               episode: index + 1,
@@ -437,27 +540,24 @@ app.get('/api/movie/:id', async (req, res) => {
         }
       }
 
-      const movieDetail = {
-        id: movie.vod_id,
-        title: movie.vod_name,
-        poster: movie.vod_pic,
-        description: movie.vod_content,
-        year: movie.vod_year,
-        area: movie.vod_area,
-        type: movie.type_name,
-        director: movie.vod_director,
-        actor: movie.vod_actor,
-        remarks: movie.vod_remarks,
-        episodes: episodes,
-        source: source,
-        sourceName: apiConfig[source].name
-      };
+      // If no episodes found, try to extract m3u8 links from content
+      if (episodes.length === 0 && videoDetail.vod_content) {
+        const m3u8Pattern = /\$https?:\/\/[^"'\s]+?\.m3u8/g;
+        const matches = videoDetail.vod_content.match(m3u8Pattern) || [];
+        episodes = matches.map(link => link.replace(/^\$/, ''));
+      }
 
+      let movieDetail = await getMovieDetail(id, source, apiConfig);
+      if (otherEpisodes.length > 0) {
+        movieDetail.episodes = otherEpisodes
+      }
+      console.log(movieDetail);
       res.json({
         success: true,
         data: movieDetail
       });
     } else {
+      console.log('Movie not found');
       res.status(404).json({
         success: false,
         error: 'Movie not found'
@@ -471,6 +571,89 @@ app.get('/api/movie/:id', async (req, res) => {
     });
   }
 });
+
+// Handle special source detail pages (HTML parsing)
+async function handleSpecialSourceDetail(id, sourceCode, sourceConfig) {
+  try {
+    const detailUrl = `${sourceConfig.detail}/index.php/vod/detail/id/${id}.html`;
+
+    const response = await axios({
+      method: 'get',
+      url: detailUrl,
+      timeout: config.timeout,
+      headers: {
+        'User-Agent': config.userAgent
+      }
+    });
+
+    const html = response.data;
+    let matches = [];
+
+    // Different regex patterns for different sources
+    if (sourceCode === 'ffzy') {
+      const ffzyPattern = /\$(https?:\/\/[^"'\s]+?\/\d{8}\/\d+_[a-f0-9]+\/index\.m3u8)/g;
+      matches = html.match(ffzyPattern) || [];
+    }
+
+    // If no matches found, try general pattern
+    if (matches.length === 0) {
+      const generalPattern = /\$(https?:\/\/[^"'\s]+?\.m3u8)/g;
+      matches = html.match(generalPattern) || [];
+    }
+
+    // Remove duplicates and clean links
+    matches = [...new Set(matches)];
+    matches = matches.map((link, index) => {
+      link = link.substring(1);
+      return {
+        episode: index + 1,
+        title: '',
+        url: link,
+      };
+    });
+
+    return matches;
+  } catch (error) {
+    return [];
+  }
+}
+
+// Handle custom API special detail pages
+async function handleCustomApiSpecialDetail(id, customDetail) {
+  try {
+    const detailUrl = `${customDetail}/index.php/vod/detail/id/${id}.html`;
+
+    const response = await axios({
+      method: 'get',
+      url: detailUrl,
+      timeout: config.timeout,
+      headers: {
+        'User-Agent': config.userAgent
+      }
+    });
+
+    const html = response.data;
+
+    // Use general pattern to extract m3u8 links
+    const generalPattern = /\$(https?:\/\/[^"'\s]+?\.m3u8)/g;
+    let matches = html.match(generalPattern) || [];
+
+    // Process links
+    matches = matches.map(link => {
+      link = link.substring(1);
+      const parenIndex = link.indexOf('(');
+      return {
+        episode: index + 1,
+        title: `第${index + 1}集`,
+        url: parenIndex > 0 ? link.substring(0, parenIndex) : link,
+      };
+    });
+    return matches;
+  } catch (error) {
+    console.error('Custom API special detail error:', error);
+    return [];
+  }
+}
 
 app.get('/api/sources', async (req, res) => {
   try {
@@ -501,18 +684,18 @@ app.get('/api/categories', async (req, res) => {
     const categories = [
       { "id": 1, "name": "电影", "type": "1", "categoryType": "content", "color": "#FF6B6B" },
       { "id": 2, "name": "电视剧", "type": "2", "categoryType": "content", "color": "#4ECDC4" },
-    
+
       { "id": 10, "name": "热门", "type": "hot", "categoryType": "trending", "color": "#FF6B6B" },
       { "id": 11, "name": "最新", "type": "latest", "categoryType": "trending", "color": "#45B7D1" },
       { "id": 12, "name": "经典", "type": "classic", "categoryType": "trending", "color": "#96CEB4" },
       { "id": 13, "name": "豆瓣高分", "type": "douban_high", "categoryType": "rating", "color": "#FFEAA7" },
       { "id": 14, "name": "冷门佳片", "type": "hidden_gems", "categoryType": "rating", "color": "#DDA0DD", "isHighlighted": true },
-    
+
       { "id": 20, "name": "华语", "type": "chinese", "categoryType": "region", "color": "#FF7675" },
       { "id": 21, "name": "欧美", "type": "western", "categoryType": "region", "color": "#74B9FF" },
       { "id": 22, "name": "韩国", "type": "korean", "categoryType": "region", "color": "#FD79A8" },
       { "id": 23, "name": "日本", "type": "japanese", "categoryType": "region", "color": "#FDCB6E" },
-    
+
       { "id": 30, "name": "动作", "type": "action", "categoryType": "genre", "color": "#E17055" },
       { "id": 31, "name": "喜剧", "type": "comedy", "categoryType": "genre", "color": "#00B894" },
       { "id": 32, "name": "爱情", "type": "romance", "categoryType": "genre", "color": "#E84393" },
@@ -742,6 +925,6 @@ app.listen(config.port, () => {
   }
   if (config.debug) {
     console.log('调试模式已启用');
-    console.log('配置:', { ...config, password: config.password ? '******' : '', adminpassword: config.adminpassword? '******' : '' });
+    console.log('配置:', { ...config, password: config.password ? '******' : '', adminpassword: config.adminpassword ? '******' : '' });
   }
 });
