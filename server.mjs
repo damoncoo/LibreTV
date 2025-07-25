@@ -122,76 +122,6 @@ function isValidUrl(urlString) {
   }
 }
 
-// 修复反向代理处理过的路径
-app.use('/proxy', (req, res, next) => {
-  const targetUrl = req.url.replace(/^\//, '').replace(/(https?:)\/([^/])/, '$1//$2');
-  req.url = '/' + encodeURIComponent(targetUrl);
-  next();
-});
-
-// 代理路由
-app.get('/proxy/:encodedUrl', async (req, res) => {
-  try {
-    const encodedUrl = req.params.encodedUrl;
-    const targetUrl = decodeURIComponent(encodedUrl);
-
-    // 安全验证
-    if (!isValidUrl(targetUrl)) {
-      return res.status(400).send('无效的 URL');
-    }
-
-    log(`代理请求: ${targetUrl}`);
-
-    // 添加请求超时和重试逻辑
-    const maxRetries = config.maxRetries;
-    let retries = 0;
-
-    const makeRequest = async () => {
-      try {
-        return await axios({
-          method: 'get',
-          url: targetUrl,
-          responseType: 'stream',
-          timeout: config.timeout,
-          headers: {
-            'User-Agent': config.userAgent
-          }
-        });
-      } catch (error) {
-        if (retries < maxRetries) {
-          retries++;
-          log(`重试请求 (${retries}/${maxRetries}): ${targetUrl}`);
-          return makeRequest();
-        }
-        throw error;
-      }
-    };
-
-    const response = await makeRequest();
-
-    // 转发响应头（过滤敏感头）
-    const headers = { ...response.headers };
-    const sensitiveHeaders = (
-      process.env.FILTERED_HEADERS ||
-      'content-security-policy,cookie,set-cookie,x-frame-options,access-control-allow-origin'
-    ).split(',');
-
-    sensitiveHeaders.forEach(header => delete headers[header]);
-    res.set(headers);
-
-    // 管道传输响应流
-    response.data.pipe(res);
-  } catch (error) {
-    console.error('代理请求错误:', error.message);
-    if (error.response) {
-      res.status(error.response.status || 500);
-      error.response.data.pipe(res);
-    } else {
-      res.status(500).send(`请求失败: ${error.message}`);
-    }
-  }
-});
-
 // Apple TV API Routes
 app.get('/api/recommendations', async (req, res) => {
   try {
@@ -894,6 +824,76 @@ function getApiConfig(includeAdult = false) {
   }
   return config;
 }
+
+// 修复反向代理处理过的路径
+app.use('/proxy', (req, res, next) => {
+  const targetUrl = req.url.replace(/^\//, '').replace(/(https?:)\/([^/])/, '$1//$2');
+  req.url = '/' + encodeURIComponent(targetUrl);
+  next();
+});
+
+// 代理路由
+app.get('/proxy/:encodedUrl', async (req, res) => {
+  try {
+    const encodedUrl = req.params.encodedUrl;
+    const targetUrl = decodeURIComponent(encodedUrl);
+
+    // 安全验证
+    if (!isValidUrl(targetUrl)) {
+      return res.status(400).send('无效的 URL');
+    }
+
+    log(`代理请求: ${targetUrl}`);
+
+    // 添加请求超时和重试逻辑
+    const maxRetries = config.maxRetries;
+    let retries = 0;
+
+    const makeRequest = async () => {
+      try {
+        return await axios({
+          method: 'get',
+          url: targetUrl,
+          responseType: 'stream',
+          timeout: config.timeout,
+          headers: {
+            'User-Agent': config.userAgent
+          }
+        });
+      } catch (error) {
+        if (retries < maxRetries) {
+          retries++;
+          log(`重试请求 (${retries}/${maxRetries}): ${targetUrl}`);
+          return makeRequest();
+        }
+        throw error;
+      }
+    };
+
+    const response = await makeRequest();
+
+    // 转发响应头（过滤敏感头）
+    const headers = { ...response.headers };
+    const sensitiveHeaders = (
+      process.env.FILTERED_HEADERS ||
+      'content-security-policy,cookie,set-cookie,x-frame-options,access-control-allow-origin'
+    ).split(',');
+
+    sensitiveHeaders.forEach(header => delete headers[header]);
+    res.set(headers);
+
+    // 管道传输响应流
+    response.data.pipe(res);
+  } catch (error) {
+    console.error('代理请求错误:', error.message);
+    if (error.response) {
+      res.status(error.response.status || 500);
+      error.response.data.pipe(res);
+    } else {
+      res.status(500).send(`请求失败: ${error.message}`);
+    }
+  }
+});
 
 app.use(express.static(path.join(__dirname), {
   maxAge: config.cacheMaxAge
